@@ -1,0 +1,5 @@
+{
+  "name": "TradeMind AI",
+  "description": "Strumento avanzato di analisi azionaria con indicatori tecnici in tempo reale (RSI, MACD, Bande di Bollinger) e approfondimenti di mercato basati sull'IA.",
+  "requestFramePermissions": []
+}
