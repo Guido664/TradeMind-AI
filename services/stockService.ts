@@ -81,11 +81,13 @@ const calculateEMA = (data: number[], window: number): number[] => {
 // --- DATA FETCHING ---
 
 const PROXY_List = [
-    // 1. AllOrigins: More reliable on Vercel/Cloud IPs, though slightly slower.
+    // 1. CodeTabs: Often very reliable for simple JSON forwarding
+    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    // 2. AllOrigins: Good fallback
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    // 2. Corsproxy: Fast but often blocks Vercel IPs.
+    // 3. Corsproxy.io: Faster but strict
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    // 3. Thingproxy: Backup.
+    // 4. Thingproxy: Backup
     (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
 ];
 
@@ -94,29 +96,34 @@ const fetchJsonWithProxy = async (targetUrl: string): Promise<any> => {
     for (const proxyGenerator of PROXY_List) {
         try {
             const proxyUrl = proxyGenerator(targetUrl);
-            const res = await fetch(proxyUrl);
+            
+            // Add timeout to prevent hanging
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+            const res = await fetch(proxyUrl, { signal: controller.signal });
+            clearTimeout(id);
             
             if (!res.ok) {
-                console.warn(`Proxy ${proxyUrl} returned status ${res.status}`);
+                // console.warn(`Proxy ${proxyUrl} returned status ${res.status}`);
                 continue;
             }
 
             const text = await res.text();
             
-            if (text.trim().startsWith('<')) {
-                // Proxy returned an error page
+            // Check for HTML error pages (common with proxies)
+            if (text.trim().startsWith('<') || text.includes('403 Forbidden')) {
                 continue; 
             }
 
             try {
                 return JSON.parse(text);
             } catch (jsonError) {
-                // If JSON parse fails, try next proxy
                 continue;
             }
 
         } catch (err) {
-            console.warn(`Fetch failed with proxy for ${targetUrl}:`, err);
+            // console.warn(`Fetch failed with proxy for ${targetUrl}:`, err);
         }
     }
     
@@ -142,46 +149,44 @@ export const searchSymbols = async (query: string): Promise<SearchResult[]> => {
   }
 
   // 2. Yahoo Search API
-  let apiSuccess = false;
   try {
-      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=10&newsCount=0&region=IT&lang=it-IT`;
+      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=6&newsCount=0&region=IT&lang=it-IT`;
       const data = await fetchJsonWithProxy(url);
 
-      if (data && data.quotes && data.quotes.length > 0) {
-          apiSuccess = true;
+      if (data && data.quotes && Array.isArray(data.quotes)) {
           const apiResults = data.quotes
               .filter((q: any) => 
-                  (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX') &&
-                  q.isYahooFinance
+                  q.symbol && // Ensure symbol exists
+                  (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX' || q.quoteType === 'CURRENCY')
               )
               .map((q: any) => ({
                   symbol: q.symbol,
                   shortname: q.shortname || q.longname || q.symbol,
-                  exchange: q.exchange,
+                  exchange: q.exchange || 'Unknown',
                   type: q.quoteType
               }));
           
           results.push(...apiResults);
       }
   } catch (e) {
-      console.warn("Search API failed", e);
+      console.warn("Search API failed, falling back to manual entry.", e);
   }
 
-  // 3. FALLBACK "FORCE RESULT"
-  // If the API failed OR returned no results, but the user typed something valid-looking,
-  // we MANUALLY add it. This ensures the user can always click and try to fetch the chart.
-  const isDuplicate = results.some(r => r.symbol === upperQuery);
-  if (!isDuplicate && cleanQuery.length > 1) {
-    // Add exact match attempt
-    results.push({
+  // 3. FALLBACK "FORCE RESULT" - GUARANTEED
+  // We strictly check if we already have an exact match. If not, add it.
+  const hasExactMatch = results.some(r => r.symbol === upperQuery);
+  
+  if (!hasExactMatch && cleanQuery.length > 0) {
+    // Add exact input as a candidate
+    results.unshift({ // Add to TOP of list
         symbol: upperQuery,
         shortname: `${upperQuery} (Ricerca Manuale)`,
         exchange: 'Global',
         type: 'EQUITY'
     });
     
-    // Suggest Milan (.MI) if it looks like a simple ticker (e.g. "ENI")
-    if (!upperQuery.includes('.') && /^[A-Z]+$/.test(upperQuery)) {
+    // If it looks like a ticker (no dots) and no results found, suggest Milan
+    if (!upperQuery.includes('.') && /^[A-Z0-9]+$/.test(upperQuery) && results.length < 3) {
         results.push({
             symbol: `${upperQuery}.MI`,
             shortname: `${upperQuery} (Piazza Affari)`,
@@ -211,13 +216,13 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
 
     const tryFetch = async (tickerToTry: string) => {
         try {
-            // Added ?corsDomain to help some proxies bypass checks
-            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}&corsDomain=finance.yahoo.com`;
+            // Using v8 chart API
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}`;
             const data = await fetchJsonWithProxy(url);
             
-            const result = data.chart.result?.[0];
+            const result = data.chart?.result?.[0];
 
-            if (result && result.timestamp && result.indicators.quote[0]) {
+            if (result && result.timestamp && result.indicators?.quote?.[0]) {
                 const timestamps = result.timestamp;
                 const quote = result.indicators.quote[0];
                 
@@ -225,7 +230,9 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
                 
                 const ohlc: OHLCData[] = [];
                 for (let i = 0; i < timestamps.length; i++) {
+                    // Filter out null data points (market holidays/glitches)
                     if (quote.close[i] === null || quote.open[i] === null) continue;
+                    
                     ohlc.push({
                         date: new Date(timestamps[i] * 1000).toISOString().split('T')[0],
                         open: quote.open[i],
@@ -241,7 +248,7 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
                 }
             }
         } catch (e) {
-            // Ignore individual fetch errors to allow retry logic
+            // fail silently to try next candidate
         }
         return null;
     }
@@ -250,14 +257,16 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
     let result = await tryFetch(symbol);
     if (result) return result;
 
-    // 2. Auto-fix attempts if exact match failed
-    // If user sent "ENI", try "ENI.MI"
+    // 2. Auto-fix attempts if exact match failed and no dot present
     if (!symbol.includes('.')) {
-        result = await tryFetch(`${symbol}.MI`);
-        if (result) return result;
-
-        // Try US Fallback (sometimes explicit .US helps)
-        // Note: Yahoo usually defaults to US without extension, but sometimes explicit helps
+        // Common suffixes to try
+        const candidates = ['.MI', '.US', '.L']; 
+        // Note: Yahoo mostly defaults to US if no suffix, but sometimes explicitly needing .US depends on the proxy/region logic
+        
+        for (const suffix of candidates) {
+             result = await tryFetch(`${symbol}${suffix}`);
+             if (result) return result;
+        }
     }
 
     return null;
