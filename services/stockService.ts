@@ -81,11 +81,11 @@ const calculateEMA = (data: number[], window: number): number[] => {
 // --- DATA FETCHING ---
 
 const PROXY_List = [
-    // Primary: corsproxy.io (Fast, usually reliable)
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    // Secondary: allorigins (Reliable, returns raw content)
+    // 1. AllOrigins: More reliable on Vercel/Cloud IPs, though slightly slower.
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    // Tertiary: thingproxy (Backup)
+    // 2. Corsproxy: Fast but often blocks Vercel IPs.
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    // 3. Thingproxy: Backup.
     (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
 ];
 
@@ -97,27 +97,26 @@ const fetchJsonWithProxy = async (targetUrl: string): Promise<any> => {
             const res = await fetch(proxyUrl);
             
             if (!res.ok) {
-                // If 429 (Too Many Requests) or 403 (Forbidden), try next proxy
                 console.warn(`Proxy ${proxyUrl} returned status ${res.status}`);
                 continue;
             }
 
             const text = await res.text();
             
-            // Basic validation to ensure we got JSON and not an HTML error page from the proxy
             if (text.trim().startsWith('<')) {
-                throw new Error("Received HTML instead of JSON");
+                // Proxy returned an error page
+                continue; 
             }
 
             try {
                 return JSON.parse(text);
             } catch (jsonError) {
-                throw new Error("Failed to parse JSON response");
+                // If JSON parse fails, try next proxy
+                continue;
             }
 
         } catch (err) {
             console.warn(`Fetch failed with proxy for ${targetUrl}:`, err);
-            // Continue to next proxy
         }
     }
     
@@ -132,7 +131,6 @@ export const searchSymbols = async (query: string): Promise<SearchResult[]> => {
   const results: SearchResult[] = [];
 
   // 1. Directa Logic Injection
-  // If user types "1GOOGL", we manually suggest "GOOGL.MI"
   if (/^1[A-Z0-9]+$/.test(upperQuery)) {
       const stripped = upperQuery.substring(1);
       results.push({
@@ -144,13 +142,13 @@ export const searchSymbols = async (query: string): Promise<SearchResult[]> => {
   }
 
   // 2. Yahoo Search API
+  let apiSuccess = false;
   try {
-      // Use region=IT and lang=it-IT to prioritize European/Italian listings
-      // Increased quotesCount to catch more variants
-      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=20&newsCount=0&region=IT&lang=it-IT`;
+      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=10&newsCount=0&region=IT&lang=it-IT`;
       const data = await fetchJsonWithProxy(url);
 
-      if (data && data.quotes) {
+      if (data && data.quotes && data.quotes.length > 0) {
+          apiSuccess = true;
           const apiResults = data.quotes
               .filter((q: any) => 
                   (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX') &&
@@ -167,6 +165,30 @@ export const searchSymbols = async (query: string): Promise<SearchResult[]> => {
       }
   } catch (e) {
       console.warn("Search API failed", e);
+  }
+
+  // 3. FALLBACK "FORCE RESULT"
+  // If the API failed OR returned no results, but the user typed something valid-looking,
+  // we MANUALLY add it. This ensures the user can always click and try to fetch the chart.
+  const isDuplicate = results.some(r => r.symbol === upperQuery);
+  if (!isDuplicate && cleanQuery.length > 1) {
+    // Add exact match attempt
+    results.push({
+        symbol: upperQuery,
+        shortname: `${upperQuery} (Ricerca Manuale)`,
+        exchange: 'Global',
+        type: 'EQUITY'
+    });
+    
+    // Suggest Milan (.MI) if it looks like a simple ticker (e.g. "ENI")
+    if (!upperQuery.includes('.') && /^[A-Z]+$/.test(upperQuery)) {
+        results.push({
+            symbol: `${upperQuery}.MI`,
+            shortname: `${upperQuery} (Piazza Affari)`,
+            exchange: 'MIL',
+            type: 'EQUITY'
+        });
+    }
   }
 
   // Deduplicate based on symbol
@@ -187,41 +209,58 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
       case '5y': range = '5y'; interval = '1wk'; break;
     }
 
-    try {
-        const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=${range}&interval=${interval}`;
-        const data = await fetchJsonWithProxy(url);
-        
-        const result = data.chart.result?.[0];
+    const tryFetch = async (tickerToTry: string) => {
+        try {
+            // Added ?corsDomain to help some proxies bypass checks
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}&corsDomain=finance.yahoo.com`;
+            const data = await fetchJsonWithProxy(url);
+            
+            const result = data.chart.result?.[0];
 
-        if (result && result.timestamp && result.indicators.quote[0]) {
-            const timestamps = result.timestamp;
-            const quote = result.indicators.quote[0];
-            
-            // Validate we have actual data
-            if (!quote.close || quote.close.length === 0) return null;
-            
-            const ohlc: OHLCData[] = [];
-            for (let i = 0; i < timestamps.length; i++) {
-                if (quote.close[i] === null || quote.open[i] === null) continue;
-                ohlc.push({
-                    date: new Date(timestamps[i] * 1000).toISOString().split('T')[0],
-                    open: quote.open[i],
-                    high: quote.high[i],
-                    low: quote.low[i],
-                    close: quote.close[i],
-                    volume: quote.volume[i] || 0
-                });
+            if (result && result.timestamp && result.indicators.quote[0]) {
+                const timestamps = result.timestamp;
+                const quote = result.indicators.quote[0];
+                
+                if (!quote.close || quote.close.length === 0) return null;
+                
+                const ohlc: OHLCData[] = [];
+                for (let i = 0; i < timestamps.length; i++) {
+                    if (quote.close[i] === null || quote.open[i] === null) continue;
+                    ohlc.push({
+                        date: new Date(timestamps[i] * 1000).toISOString().split('T')[0],
+                        open: quote.open[i],
+                        high: quote.high[i],
+                        low: quote.low[i],
+                        close: quote.close[i],
+                        volume: quote.volume[i] || 0
+                    });
+                }
+                
+                if (ohlc.length > 0) {
+                    return { data: ohlc, usedTicker: tickerToTry };
+                }
             }
-            
-            if (ohlc.length > 0) {
-                return { data: ohlc, usedTicker: symbol };
-            }
+        } catch (e) {
+            // Ignore individual fetch errors to allow retry logic
         }
         return null;
-    } catch (e) {
-        console.warn(`Fetch failed for ${symbol}`, e);
-        return null;
     }
+
+    // 1. Try Exact Match
+    let result = await tryFetch(symbol);
+    if (result) return result;
+
+    // 2. Auto-fix attempts if exact match failed
+    // If user sent "ENI", try "ENI.MI"
+    if (!symbol.includes('.')) {
+        result = await tryFetch(`${symbol}.MI`);
+        if (result) return result;
+
+        // Try US Fallback (sometimes explicit .US helps)
+        // Note: Yahoo usually defaults to US without extension, but sometimes explicit helps
+    }
+
+    return null;
 }
 
 const generateSimulatedHistory = (ticker: string, timeframe: TimeFrame): OHLCData[] => {
@@ -257,19 +296,8 @@ const generateSimulatedHistory = (ticker: string, timeframe: TimeFrame): OHLCDat
 // --- MAIN ANALYSIS FUNCTION ---
 
 export const generateMarketData = async (ticker: string, timeframe: TimeFrame): Promise<AnalysisResult> => {
-  // Direct fetch first
   let fetchResult = await fetchYahooData(ticker, timeframe);
   
-  // Fallback: If direct fetch fails, maybe the user typed a raw ticker without extension that needs resolving?
-  // We keep a small fallback logic here just in case, but rely mostly on the Search step now.
-  if (!fetchResult && !ticker.includes('.')) {
-       const candidates = [`${ticker}.MI`, `${ticker}.DE`];
-       for (const c of candidates) {
-           fetchResult = await fetchYahooData(c, timeframe);
-           if (fetchResult) break;
-       }
-  }
-
   let isSimulated = false;
   let usedTicker = ticker;
   let history: OHLCData[];
@@ -278,6 +306,8 @@ export const generateMarketData = async (ticker: string, timeframe: TimeFrame): 
     history = fetchResult.data;
     usedTicker = fetchResult.usedTicker;
   } else {
+    // FAILED to fetch real data
+    console.warn(`Failed to fetch real data for ${ticker}, switching to simulation.`);
     history = generateSimulatedHistory(ticker, timeframe);
     isSimulated = true;
   }
