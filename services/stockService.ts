@@ -80,29 +80,20 @@ const calculateEMA = (data: number[], window: number): number[] => {
 
 // --- ROBUST PROXY FETCHER ---
 
-// Define different strategies for fetching to avoid bottlenecks
 const fetchStrategies = [
-    // Strategy 1: AllOrigins JSON Wrapper (Highest Reliability)
-    // We request a wrapped JSON response. This bypasses many CORS headers issues because we get a 200 OK from AllOrigins
-    // and the actual data is inside the "contents" string.
+    // 1. AllOrigins RAW: Usually the most compatible for large JSON
     async (url: string) => {
-        const encodedUrl = encodeURIComponent(url);
-        const res = await fetch(`https://api.allorigins.win/get?url=${encodedUrl}`);
+        const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
         if (!res.ok) throw new Error(`AllOrigins status: ${res.status}`);
-        const data = await res.json();
-        // AllOrigins returns { contents: "string_of_json", status: ... }
-        if (!data.contents) throw new Error("AllOrigins returned no content");
-        return JSON.parse(data.contents);
+        return res.json();
     },
-
-    // Strategy 2: CodeTabs (Fast, standard proxy)
+    // 2. CodeTabs: Good alternative
     async (url: string) => {
         const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
         if (!res.ok) throw new Error(`CodeTabs status: ${res.status}`);
         return res.json();
     },
-
-    // Strategy 3: CorsProxy.io (Backup)
+    // 3. CorsProxy: Backup
     async (url: string) => {
         const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
         if (!res.ok) throw new Error(`CorsProxy status: ${res.status}`);
@@ -114,19 +105,24 @@ const fetchWithRetries = async (targetUrl: string): Promise<any> => {
     // Try each strategy in order
     for (const strategy of fetchStrategies) {
         try {
-            // Add a timeout to each request so we don't hang forever on a bad proxy
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
+
             const result = await Promise.race([
                 strategy(targetUrl),
-                new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 4000))
+                new Promise((_, reject) => {
+                    // This promise handles the timeout logic if fetch doesn't support signal or hangs
+                    controller.signal.addEventListener('abort', () => reject(new Error("Timeout")));
+                })
             ]);
+            clearTimeout(timeoutId);
             
-            // If we got here, it worked. Validate basic JSON structure for Yahoo
-            if (result && (result.chart || result.quotes || result.optionChain)) {
+            // Validate result structure for Yahoo
+            if (result && (result.chart || result.quotes || result.optionChain || result.quoteResponse)) {
                 return result;
             }
         } catch (err) {
             // console.warn(`Strategy failed for ${targetUrl}:`, err);
-            // Continue to next strategy
         }
     }
     throw new Error(`All proxies failed for URL: ${targetUrl}`);
@@ -139,67 +135,48 @@ export const searchSymbols = async (query: string): Promise<SearchResult[]> => {
   const upperQuery = cleanQuery.toUpperCase();
   const results: SearchResult[] = [];
 
-  // 1. Directa Logic Injection
-  if (/^1[A-Z0-9]+$/.test(upperQuery)) {
-      const stripped = upperQuery.substring(1);
+  // 1. Always add Manual Entry FIRST (Fallback Immediate)
+  if (cleanQuery.length > 0) {
       results.push({
-          symbol: `${stripped}.MI`,
-          shortname: `${stripped} (Directa/GEM)`,
-          exchange: 'Borsa Italiana',
+          symbol: upperQuery,
+          shortname: `${upperQuery} (Ricerca Manuale)`,
+          exchange: 'Global',
           type: 'EQUITY'
       });
-  }
-
-  // 2. Yahoo Search API
-  if (cleanQuery.length > 0) {
-      try {
-          const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=6&newsCount=0&region=IT&lang=it-IT`;
-          const data = await fetchWithRetries(url);
-
-          if (data && data.quotes && Array.isArray(data.quotes)) {
-              const apiResults = data.quotes
-                  .filter((q: any) => 
-                      q.symbol && 
-                      (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX' || q.quoteType === 'CURRENCY')
-                  )
-                  .map((q: any) => ({
-                      symbol: q.symbol,
-                      shortname: q.shortname || q.longname || q.symbol,
-                      exchange: q.exchange || 'Unknown',
-                      type: q.quoteType
-                  }));
-              
-              results.push(...apiResults);
-          }
-      } catch (e) {
-          console.warn("Search API failed, falling back to manual entry.");
+      
+      // Suggest .MI if simple ticker
+      if (!upperQuery.includes('.') && /^[A-Z0-9]+$/.test(upperQuery)) {
+          results.push({
+              symbol: `${upperQuery}.MI`,
+              shortname: `${upperQuery} (Piazza Affari)`,
+              exchange: 'MIL',
+              type: 'EQUITY'
+          });
       }
   }
 
-  // 3. FALLBACK "FORCE RESULT" - GUARANTEED
-  // Always include the exact user input if it's not already in the list.
-  const hasExactMatch = results.some(r => r.symbol === upperQuery);
-  
-  if (!hasExactMatch && cleanQuery.length > 0) {
-    // Add exact input as top result
-    results.unshift({
-        symbol: upperQuery,
-        shortname: `${upperQuery} (Input Manuale)`,
-        exchange: 'Global',
-        type: 'EQUITY'
-    });
-    
-    // Smart suggestions for common missing suffixes
-    if (!upperQuery.includes('.') && /^[A-Z0-9]+$/.test(upperQuery)) {
-        if (!results.some(r => r.symbol === `${upperQuery}.MI`)) {
-            results.push({
-                symbol: `${upperQuery}.MI`,
-                shortname: `${upperQuery} (Piazza Affari)`,
-                exchange: 'MIL',
-                type: 'EQUITY'
-            });
-        }
-    }
+  // 2. Try Yahoo Search API (Enhancement)
+  try {
+      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=5&newsCount=0&region=IT&lang=it-IT`;
+      const data = await fetchWithRetries(url);
+
+      if (data && data.quotes && Array.isArray(data.quotes)) {
+          const apiResults = data.quotes
+              .filter((q: any) => 
+                  q.symbol && 
+                  (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX' || q.quoteType === 'CURRENCY' || q.quoteType === 'CRYPTOCURRENCY')
+              )
+              .map((q: any) => ({
+                  symbol: q.symbol,
+                  shortname: q.shortname || q.longname || q.symbol,
+                  exchange: q.exchange || 'Unknown',
+                  type: q.quoteType
+              }));
+          
+          results.push(...apiResults);
+      }
+  } catch (e) {
+      console.warn("Search API failed, using manual fallback only.");
   }
 
   // Deduplicate
@@ -222,10 +199,10 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
 
     const tryFetch = async (tickerToTry: string) => {
         try {
-            // Using v8 chart API
-            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}&includePrePost=false&events=div%7Csplit`;
-            const data = await fetchWithRetries(url);
+            // Simplified URL: Removed events and other params to reduce encoding errors
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}&includePrePost=false`;
             
+            const data = await fetchWithRetries(url);
             const result = data.chart?.result?.[0];
 
             if (result && result.timestamp && result.indicators?.quote?.[0]) {
@@ -236,7 +213,8 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
                 
                 const ohlc: OHLCData[] = [];
                 for (let i = 0; i < timestamps.length; i++) {
-                    if (quote.close[i] === null || quote.open[i] === null) continue;
+                    // Strict null check
+                    if (quote.close[i] == null || quote.open[i] == null) continue;
                     
                     ohlc.push({
                         date: new Date(timestamps[i] * 1000).toISOString().split('T')[0],
@@ -248,7 +226,7 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
                     });
                 }
                 
-                if (ohlc.length > 0) {
+                if (ohlc.length > 5) { // Ensure we have enough data points
                     return { data: ohlc, usedTicker: tickerToTry };
                 }
             }
@@ -262,7 +240,7 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
     let result = await tryFetch(symbol);
     if (result) return result;
 
-    // 2. Retry with common suffixes if plain ticker failed
+    // 2. Retry with common suffixes
     if (!symbol.includes('.')) {
         const suffixes = ['.MI', '.US', '.L', '.DE', '.PA'];
         for (const suffix of suffixes) {
