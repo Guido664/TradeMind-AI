@@ -80,18 +80,48 @@ const calculateEMA = (data: number[], window: number): number[] => {
 
 // --- DATA FETCHING ---
 
+const PROXY_List = [
+    // Primary: corsproxy.io (Fast, usually reliable)
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    // Secondary: allorigins (Reliable, returns raw content)
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    // Tertiary: thingproxy (Backup)
+    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
+];
+
 const fetchJsonWithProxy = async (targetUrl: string): Promise<any> => {
-    try {
-        // Proxy 1: corsproxy.io
-        const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(targetUrl)}`);
-        if (res.ok) return await res.json();
-        throw new Error(`Proxy 1 failed: ${res.status}`);
-    } catch (err1) {
-        // Proxy 2: allorigins.win (raw)
-        const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`);
-        if (res.ok) return await res.json();
-        throw new Error(`All proxies failed`);
+    // Try proxies in order
+    for (const proxyGenerator of PROXY_List) {
+        try {
+            const proxyUrl = proxyGenerator(targetUrl);
+            const res = await fetch(proxyUrl);
+            
+            if (!res.ok) {
+                // If 429 (Too Many Requests) or 403 (Forbidden), try next proxy
+                console.warn(`Proxy ${proxyUrl} returned status ${res.status}`);
+                continue;
+            }
+
+            const text = await res.text();
+            
+            // Basic validation to ensure we got JSON and not an HTML error page from the proxy
+            if (text.trim().startsWith('<')) {
+                throw new Error("Received HTML instead of JSON");
+            }
+
+            try {
+                return JSON.parse(text);
+            } catch (jsonError) {
+                throw new Error("Failed to parse JSON response");
+            }
+
+        } catch (err) {
+            console.warn(`Fetch failed with proxy for ${targetUrl}:`, err);
+            // Continue to next proxy
+        }
     }
+    
+    throw new Error(`All proxies failed for URL: ${targetUrl}`);
 };
 
 // --- SEARCH FUNCTIONALITY ---
