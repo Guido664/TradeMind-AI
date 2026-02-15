@@ -12,15 +12,25 @@ export default defineConfig(({ mode }) => {
       port: 3000
     },
     build: {
+      chunkSizeWarningLimit: 1600,
       rollupOptions: {
         output: {
-          manualChunks: {
-            vendor: ['react', 'react-dom', 'recharts', 'framer-motion'],
-            ai: ['@google/genai']
+          manualChunks: (id) => {
+            if (id.includes('node_modules')) {
+              if (id.includes('react') || id.includes('react-dom')) {
+                return 'vendor-react';
+              }
+              if (id.includes('recharts')) {
+                return 'vendor-recharts';
+              }
+              if (id.includes('@google/genai')) {
+                return 'vendor-ai';
+              }
+              return 'vendor-others';
+            }
           }
         }
-      },
-      chunkSizeWarningLimit: 1000
+      }
     }
   };
 });

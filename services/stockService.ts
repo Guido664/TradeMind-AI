@@ -78,55 +78,57 @@ const calculateEMA = (data: number[], window: number): number[] => {
   return emaArray;
 };
 
-// --- DATA FETCHING ---
+// --- ROBUST PROXY FETCHER ---
 
-const PROXY_List = [
-    // 1. CodeTabs: Often very reliable for simple JSON forwarding
-    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    // 2. AllOrigins: Good fallback
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    // 3. Corsproxy.io: Faster but strict
-    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    // 4. Thingproxy: Backup
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
+// Define different strategies for fetching to avoid bottlenecks
+const fetchStrategies = [
+    // Strategy 1: AllOrigins JSON Wrapper (Highest Reliability)
+    // We request a wrapped JSON response. This bypasses many CORS headers issues because we get a 200 OK from AllOrigins
+    // and the actual data is inside the "contents" string.
+    async (url: string) => {
+        const encodedUrl = encodeURIComponent(url);
+        const res = await fetch(`https://api.allorigins.win/get?url=${encodedUrl}`);
+        if (!res.ok) throw new Error(`AllOrigins status: ${res.status}`);
+        const data = await res.json();
+        // AllOrigins returns { contents: "string_of_json", status: ... }
+        if (!data.contents) throw new Error("AllOrigins returned no content");
+        return JSON.parse(data.contents);
+    },
+
+    // Strategy 2: CodeTabs (Fast, standard proxy)
+    async (url: string) => {
+        const res = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error(`CodeTabs status: ${res.status}`);
+        return res.json();
+    },
+
+    // Strategy 3: CorsProxy.io (Backup)
+    async (url: string) => {
+        const res = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
+        if (!res.ok) throw new Error(`CorsProxy status: ${res.status}`);
+        return res.json();
+    }
 ];
 
-const fetchJsonWithProxy = async (targetUrl: string): Promise<any> => {
-    // Try proxies in order
-    for (const proxyGenerator of PROXY_List) {
+const fetchWithRetries = async (targetUrl: string): Promise<any> => {
+    // Try each strategy in order
+    for (const strategy of fetchStrategies) {
         try {
-            const proxyUrl = proxyGenerator(targetUrl);
+            // Add a timeout to each request so we don't hang forever on a bad proxy
+            const result = await Promise.race([
+                strategy(targetUrl),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 4000))
+            ]);
             
-            // Add timeout to prevent hanging
-            const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 5000); // 5s timeout
-
-            const res = await fetch(proxyUrl, { signal: controller.signal });
-            clearTimeout(id);
-            
-            if (!res.ok) {
-                // console.warn(`Proxy ${proxyUrl} returned status ${res.status}`);
-                continue;
+            // If we got here, it worked. Validate basic JSON structure for Yahoo
+            if (result && (result.chart || result.quotes || result.optionChain)) {
+                return result;
             }
-
-            const text = await res.text();
-            
-            // Check for HTML error pages (common with proxies)
-            if (text.trim().startsWith('<') || text.includes('403 Forbidden')) {
-                continue; 
-            }
-
-            try {
-                return JSON.parse(text);
-            } catch (jsonError) {
-                continue;
-            }
-
         } catch (err) {
-            // console.warn(`Fetch failed with proxy for ${targetUrl}:`, err);
+            // console.warn(`Strategy failed for ${targetUrl}:`, err);
+            // Continue to next strategy
         }
     }
-    
     throw new Error(`All proxies failed for URL: ${targetUrl}`);
 };
 
@@ -149,54 +151,58 @@ export const searchSymbols = async (query: string): Promise<SearchResult[]> => {
   }
 
   // 2. Yahoo Search API
-  try {
-      const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=6&newsCount=0&region=IT&lang=it-IT`;
-      const data = await fetchJsonWithProxy(url);
+  if (cleanQuery.length > 0) {
+      try {
+          const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=6&newsCount=0&region=IT&lang=it-IT`;
+          const data = await fetchWithRetries(url);
 
-      if (data && data.quotes && Array.isArray(data.quotes)) {
-          const apiResults = data.quotes
-              .filter((q: any) => 
-                  q.symbol && // Ensure symbol exists
-                  (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX' || q.quoteType === 'CURRENCY')
-              )
-              .map((q: any) => ({
-                  symbol: q.symbol,
-                  shortname: q.shortname || q.longname || q.symbol,
-                  exchange: q.exchange || 'Unknown',
-                  type: q.quoteType
-              }));
-          
-          results.push(...apiResults);
+          if (data && data.quotes && Array.isArray(data.quotes)) {
+              const apiResults = data.quotes
+                  .filter((q: any) => 
+                      q.symbol && 
+                      (q.quoteType === 'EQUITY' || q.quoteType === 'ETF' || q.quoteType === 'MUTUALFUND' || q.quoteType === 'INDEX' || q.quoteType === 'CURRENCY')
+                  )
+                  .map((q: any) => ({
+                      symbol: q.symbol,
+                      shortname: q.shortname || q.longname || q.symbol,
+                      exchange: q.exchange || 'Unknown',
+                      type: q.quoteType
+                  }));
+              
+              results.push(...apiResults);
+          }
+      } catch (e) {
+          console.warn("Search API failed, falling back to manual entry.");
       }
-  } catch (e) {
-      console.warn("Search API failed, falling back to manual entry.", e);
   }
 
   // 3. FALLBACK "FORCE RESULT" - GUARANTEED
-  // We strictly check if we already have an exact match. If not, add it.
+  // Always include the exact user input if it's not already in the list.
   const hasExactMatch = results.some(r => r.symbol === upperQuery);
   
   if (!hasExactMatch && cleanQuery.length > 0) {
-    // Add exact input as a candidate
-    results.unshift({ // Add to TOP of list
+    // Add exact input as top result
+    results.unshift({
         symbol: upperQuery,
-        shortname: `${upperQuery} (Ricerca Manuale)`,
+        shortname: `${upperQuery} (Input Manuale)`,
         exchange: 'Global',
         type: 'EQUITY'
     });
     
-    // If it looks like a ticker (no dots) and no results found, suggest Milan
-    if (!upperQuery.includes('.') && /^[A-Z0-9]+$/.test(upperQuery) && results.length < 3) {
-        results.push({
-            symbol: `${upperQuery}.MI`,
-            shortname: `${upperQuery} (Piazza Affari)`,
-            exchange: 'MIL',
-            type: 'EQUITY'
-        });
+    // Smart suggestions for common missing suffixes
+    if (!upperQuery.includes('.') && /^[A-Z0-9]+$/.test(upperQuery)) {
+        if (!results.some(r => r.symbol === `${upperQuery}.MI`)) {
+            results.push({
+                symbol: `${upperQuery}.MI`,
+                shortname: `${upperQuery} (Piazza Affari)`,
+                exchange: 'MIL',
+                type: 'EQUITY'
+            });
+        }
     }
   }
 
-  // Deduplicate based on symbol
+  // Deduplicate
   const uniqueResults = results.filter((v, i, a) => a.findIndex(t => t.symbol === v.symbol) === i);
   
   return uniqueResults;
@@ -217,8 +223,8 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
     const tryFetch = async (tickerToTry: string) => {
         try {
             // Using v8 chart API
-            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}`;
-            const data = await fetchJsonWithProxy(url);
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${tickerToTry}?range=${range}&interval=${interval}&includePrePost=false&events=div%7Csplit`;
+            const data = await fetchWithRetries(url);
             
             const result = data.chart?.result?.[0];
 
@@ -230,7 +236,6 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
                 
                 const ohlc: OHLCData[] = [];
                 for (let i = 0; i < timestamps.length; i++) {
-                    // Filter out null data points (market holidays/glitches)
                     if (quote.close[i] === null || quote.open[i] === null) continue;
                     
                     ohlc.push({
@@ -248,7 +253,7 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
                 }
             }
         } catch (e) {
-            // fail silently to try next candidate
+            // fail silently
         }
         return null;
     }
@@ -257,13 +262,10 @@ const fetchYahooData = async (symbol: string, timeframe: TimeFrame): Promise<{da
     let result = await tryFetch(symbol);
     if (result) return result;
 
-    // 2. Auto-fix attempts if exact match failed and no dot present
+    // 2. Retry with common suffixes if plain ticker failed
     if (!symbol.includes('.')) {
-        // Common suffixes to try
-        const candidates = ['.MI', '.US', '.L']; 
-        // Note: Yahoo mostly defaults to US if no suffix, but sometimes explicitly needing .US depends on the proxy/region logic
-        
-        for (const suffix of candidates) {
+        const suffixes = ['.MI', '.US', '.L', '.DE', '.PA'];
+        for (const suffix of suffixes) {
              result = await tryFetch(`${symbol}${suffix}`);
              if (result) return result;
         }
