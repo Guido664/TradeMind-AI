@@ -14,12 +14,38 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [aiInsight, setAiInsight] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+  
+  // Favorites State with lazy initialization from localStorage
+  const [favorites, setFavorites] = useState<string[]>(() => {
+    const saved = localStorage.getItem('tm_favorites');
+    return saved ? JSON.parse(saved) : [];
+  });
 
   // Load initial data on mount
   useEffect(() => {
     handleAnalyze('AAPL', '6m');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Save favorites to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem('tm_favorites', JSON.stringify(favorites));
+  }, [favorites]);
+
+  const toggleFavorite = () => {
+    if (!result) return;
+    const ticker = result.ticker;
+    
+    if (favorites.includes(ticker)) {
+      setFavorites(prev => prev.filter(t => t !== ticker));
+    } else {
+      setFavorites(prev => [...prev, ticker]);
+    }
+  };
+
+  const removeFavorite = (ticker: string) => {
+    setFavorites(prev => prev.filter(t => t !== ticker));
+  }
 
   const handleAnalyze = async (ticker: string, timeframe: TimeFrame) => {
     setLoading(true);
@@ -48,12 +74,16 @@ const App: React.FC = () => {
     setAiLoading(false);
   };
 
+  const isFavorite = result ? favorites.includes(result.ticker) : false;
+
   return (
     <div className="flex flex-col md:flex-row min-h-screen bg-slate-900 text-slate-50 overflow-hidden">
       <Sidebar 
         onAnalyze={handleAnalyze} 
         isLoading={loading} 
         isSimulated={result?.isSimulated}
+        favorites={favorites}
+        onRemoveFavorite={removeFavorite}
       />
 
       <main className="flex-1 overflow-y-auto h-screen p-4 md:p-8 relative">
@@ -67,11 +97,22 @@ const App: React.FC = () => {
           <div className="max-w-6xl mx-auto space-y-6 pb-20">
             {/* Header Section */}
             <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 mb-2">
-              <div>
-                <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-white mb-2">
-                  {result.ticker}
-                </h1>
-                <p className="text-slate-400 font-medium">Analisi di Mercato {result.isSimulated ? '(Simulazione)' : ''}</p>
+              <div className="flex items-start gap-3">
+                 <div>
+                    <div className="flex items-center gap-3 mb-2">
+                        <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-white">
+                        {result.ticker}
+                        </h1>
+                        <button 
+                            onClick={toggleFavorite}
+                            className={`p-2 rounded-full transition-all ${isFavorite ? 'bg-yellow-500/10 hover:bg-yellow-500/20' : 'bg-slate-800 hover:bg-slate-700'}`}
+                            title={isFavorite ? "Rimuovi dai Preferiti" : "Aggiungi ai Preferiti"}
+                        >
+                            {isFavorite ? ICONS.STAR_FILLED : ICONS.STAR}
+                        </button>
+                    </div>
+                    <p className="text-slate-400 font-medium">Analisi di Mercato {result.isSimulated ? '(Simulazione)' : ''}</p>
+                 </div>
               </div>
               <div className="text-right">
                 <div className="text-3xl font-bold font-mono text-white">

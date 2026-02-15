@@ -7,9 +7,11 @@ interface SidebarProps {
   onAnalyze: (ticker: string, timeframe: TimeFrame) => void;
   isLoading: boolean;
   isSimulated?: boolean;
+  favorites: string[];
+  onRemoveFavorite: (ticker: string) => void;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ onAnalyze, isLoading, isSimulated }) => {
+const Sidebar: React.FC<SidebarProps> = ({ onAnalyze, isLoading, isSimulated, favorites, onRemoveFavorite }) => {
   const [tickerInput, setTickerInput] = useState('AAPL');
   const [timeframe, setTimeframe] = useState<TimeFrame>('6m');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -134,6 +136,35 @@ const Sidebar: React.FC<SidebarProps> = ({ onAnalyze, isLoading, isSimulated }) 
                     </div>
                 )}
             </div>
+        )}
+
+        {/* Favorites List */}
+        {favorites.length > 0 && (
+          <div>
+             <label className="block text-slate-400 text-sm font-medium mb-2 uppercase tracking-wider flex items-center gap-2">
+                <span>Preferiti</span>
+                <span className="bg-indigo-600 text-white text-[10px] px-1.5 py-0.5 rounded-full">{favorites.length}</span>
+             </label>
+             <div className="max-h-[200px] overflow-y-auto pr-1 space-y-1">
+               {favorites.map((favTicker) => (
+                 <div key={favTicker} className="group flex items-center justify-between bg-slate-700/50 hover:bg-slate-700 rounded-lg p-2 transition-colors border border-transparent hover:border-slate-600">
+                    <button 
+                      onClick={() => onAnalyze(favTicker, timeframe)}
+                      className="flex-1 text-left font-semibold text-slate-200 hover:text-indigo-400 transition-colors text-sm"
+                    >
+                      {favTicker}
+                    </button>
+                    <button 
+                      onClick={() => onRemoveFavorite(favTicker)}
+                      className="text-slate-500 hover:text-rose-400 p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Rimuovi dai preferiti"
+                    >
+                      {ICONS.TRASH}
+                    </button>
+                 </div>
+               ))}
+             </div>
+          </div>
         )}
 
         <div>
