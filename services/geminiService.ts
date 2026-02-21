@@ -6,9 +6,9 @@ export const generateStockInsight = async (
   price: number, 
   indicators: TechnicalIndicators
 ): Promise<string> => {
-  const apiKey = process.env.API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("API Key is missing");
+    throw new Error("GEMINI_API_KEY is missing. Please set it in your environment variables.");
   }
 
   const ai = new GoogleGenAI({ apiKey });

@@ -282,11 +282,72 @@ const generateSimulatedHistory = (ticker: string, timeframe: TimeFrame): OHLCDat
   return history;
 }
 
+// --- FMP FETCHER ---
+
+const fetchFMPData = async (symbol: string, timeframe: TimeFrame): Promise<{data: OHLCData[], usedTicker: string} | null> => {
+    const apiKey = process.env.FMP_API_KEY;
+    if (!apiKey) return null;
+
+    // FMP Free tier supports daily data well. Intraday is often restricted.
+    // We will use daily data for 6m/1y/5y and try 1min/5min for 1m if available, else fallback to daily.
+    
+    // Map timeframe to FMP "timeseries" logic roughly
+    // For free tier, 'historical-price-full' gives daily data up to 5 years.
+    
+    try {
+        const response = await fetch(`https://financialmodelingprep.com/api/v3/historical-price-full/${symbol}?apikey=${apiKey}`);
+        const json = await response.json();
+
+        if (json && json.historical && Array.isArray(json.historical) && json.historical.length > 0) {
+             // FMP returns data sorted by date descending (newest first)
+             // We need ascending for our charts
+             const sortedData = json.historical.reverse();
+             
+             // Filter based on timeframe if needed, but FMP returns last 5 years usually
+             let filteredData = sortedData;
+             const now = new Date();
+             let cutoffDate = new Date();
+
+             switch (timeframe) {
+                case '1m': cutoffDate.setMonth(now.getMonth() - 1); break;
+                case '6m': cutoffDate.setMonth(now.getMonth() - 6); break;
+                case '1y': cutoffDate.setFullYear(now.getFullYear() - 1); break;
+                case '5y': cutoffDate.setFullYear(now.getFullYear() - 5); break;
+             }
+
+             filteredData = sortedData.filter((d: any) => new Date(d.date) >= cutoffDate);
+
+             const ohlc: OHLCData[] = filteredData.map((d: any) => ({
+                 date: d.date,
+                 open: d.open,
+                 high: d.high,
+                 low: d.low,
+                 close: d.close,
+                 volume: d.volume
+             }));
+
+             if (ohlc.length > 5) {
+                 return { data: ohlc, usedTicker: symbol };
+             }
+        }
+    } catch (e) {
+        console.warn("FMP API failed:", e);
+    }
+    return null;
+}
+
 // --- MAIN ANALYSIS FUNCTION ---
 
 export const generateMarketData = async (ticker: string, timeframe: TimeFrame): Promise<AnalysisResult> => {
+  // 1. Try Yahoo Finance (via Proxy)
   let fetchResult = await fetchYahooData(ticker, timeframe);
   
+  // 2. If Yahoo fails, try Financial Modeling Prep (FMP)
+  if (!fetchResult) {
+      console.log(`Yahoo failed for ${ticker}, trying FMP...`);
+      fetchResult = await fetchFMPData(ticker, timeframe);
+  }
+
   let isSimulated = false;
   let usedTicker = ticker;
   let history: OHLCData[];
@@ -295,7 +356,7 @@ export const generateMarketData = async (ticker: string, timeframe: TimeFrame): 
     history = fetchResult.data;
     usedTicker = fetchResult.usedTicker;
   } else {
-    // FAILED to fetch real data
+    // 3. FAILED to fetch real data
     console.warn(`Failed to fetch real data for ${ticker}, switching to simulation.`);
     history = generateSimulatedHistory(ticker, timeframe);
     isSimulated = true;
