@@ -10,7 +10,19 @@ export default defineConfig(({ mode }) => {
       'process.env.FMP_API_KEY': JSON.stringify(env.FMP_API_KEY)
     },
     server: {
-      port: 3000
+      port: 3000,
+      proxy: {
+        '/api/yahoo': {
+          target: 'https://query1.finance.yahoo.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/yahoo/, '')
+        },
+        '/api/tradingview': {
+          target: 'https://symbol-search.tradingview.com',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/tradingview/, '')
+        }
+      }
     },
     build: {
       chunkSizeWarningLimit: 1600,

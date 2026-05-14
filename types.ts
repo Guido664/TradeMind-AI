@@ -33,6 +33,7 @@ export interface AnalysisResult {
   data: (OHLCData & TechnicalIndicators)[];
   latestIndicators: TechnicalIndicators;
   isSimulated: boolean;
+  mlSignal?: 'COMPRA' | 'VENDI' | 'NEUTRALE';
 }
 
 export interface GeminiInsight {

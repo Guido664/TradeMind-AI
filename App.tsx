@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
-import StockChart from './components/StockChart';
 import IndicatorCard from './components/IndicatorCard';
 import SignalAlert from './components/SignalAlert';
-import OscillatorChart from './components/OscillatorChart';
 import { generateMarketData } from './services/stockService';
 import { generateStockInsight } from './services/geminiService';
 import { AnalysisResult, TimeFrame } from './types';
@@ -127,14 +125,31 @@ const App: React.FC = () => {
               </div>
             </div>
 
+            {/* ML Lorentzian Signal */}
+            {result.mlSignal && result.mlSignal !== 'NEUTRALE' && (
+              <div className={`rounded-xl p-6 border flex items-center justify-between mb-6 shadow-2xl ${
+                result.mlSignal === 'COMPRA' 
+                  ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-400' 
+                  : 'bg-rose-600/20 border-rose-500/50 text-rose-400'
+              }`}>
+                <div>
+                  <h3 className="font-bold text-2xl mb-1 text-white flex items-center gap-2">
+                    {ICONS.Sparkles} Machine Learning: Lorentzian Classification
+                  </h3>
+                  <p className="text-sm opacity-90 text-slate-300">
+                    Previsione dell'algoritmo basata su Nearest Neighbors e distanza di Lorentz.
+                  </p>
+                </div>
+                <div className={`px-6 py-3 rounded-xl font-black text-3xl tracking-widest uppercase shadow-lg ${
+                  result.mlSignal === 'COMPRA' ? 'bg-emerald-500 text-white shadow-emerald-500/30' : 'bg-rose-500 text-white shadow-rose-500/30'
+                }`}>
+                  {result.mlSignal}
+                </div>
+              </div>
+            )}
+
             {/* Signal Alert */}
             <SignalAlert rsi={result.latestIndicators.rsi14} />
-
-            {/* Main Chart with Volume */}
-            <StockChart data={result.data} />
-            
-            {/* Oscillators History */}
-            <OscillatorChart data={result.data} />
 
             {/* Indicators Grid */}
             <div>
